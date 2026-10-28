@@ -351,6 +351,7 @@ const DerivedConfig = struct {
     notify_on_command_finish_action: configpkg.Config.NotifyOnCommandFinishAction,
     notify_on_command_finish_after: Duration,
     key_remaps: input.KeyRemapSet,
+    prompt_padding_top: u16,
 
     const Link = struct {
         regex: oni.Regex,
@@ -432,6 +433,7 @@ const DerivedConfig = struct {
             .notify_on_command_finish_action = config.@"notify-on-command-finish-action",
             .notify_on_command_finish_after = config.@"notify-on-command-finish-after",
             .key_remaps = try config.@"key-remap".clone(alloc),
+            .prompt_padding_top = config.@"prompt-padding-top",
 
             // Assignments happen sequentially so we have to do this last
             // so that the memory is captured from allocs above.
@@ -1254,13 +1256,13 @@ fn selectionScrollTick(self: *Surface) !void {
         return;
     }
 
-    const pos = try self.rt_surface.getCursorPos();
-    const pos_vp = self.posToViewport(pos.x, pos.y);
-
     // We need our locked state for the remainder
     self.renderer_state.mutex.lockUncancelable(global.io());
     defer self.renderer_state.mutex.unlock(global.io());
     const t: *terminal.Terminal = self.renderer_state.terminal;
+
+    const pos = try self.rt_surface.getCursorPos();
+    const pos_vp = self.posToViewport(pos.x, pos.y);
 
     const selection = self.mouse.selection_gesture.autoscrollTick(t, .{
         .viewport = pos_vp,
@@ -4723,9 +4725,6 @@ pub fn cursorPosCallback(
     // Update our modifiers if they changed
     if (mods) |v| self.modsChanged(v);
 
-    // The mouse position in the viewport
-    const pos_vp = self.posToViewport(pos.x, pos.y);
-
     // We always reset the over link status because it will be reprocessed
     // below. But we need the old value to know if we need to undo mouse
     // shape changes.
@@ -4735,6 +4734,9 @@ pub fn cursorPosCallback(
     // We are reading/writing state for the remainder
     self.renderer_state.mutex.lockUncancelable(global.io());
     defer self.renderer_state.mutex.unlock(global.io());
+
+    // The mouse position in the viewport
+    const pos_vp = self.posToViewport(pos.x, pos.y);
 
     // Update our mouse state. We set this to null initially because we only
     // want to set it when we're not selecting or doing any other mouse
@@ -4890,10 +4892,52 @@ pub fn colorSchemeCallback(self: *Surface, scheme: apprt.ColorScheme) !void {
 }
 
 pub fn posToViewport(self: Surface, xpos: f64, ypos: f64) terminal.point.Coordinate {
-    // Get our grid cell
-    const coord: rendererpkg.Coordinate = .{ .surface = .{ .x = xpos, .y = ypos } };
-    const grid = coord.convert(.grid, self.size).grid;
-    return .{ .x = grid.x, .y = grid.y };
+    // Fast path: if prompt-padding-top is 0 or on alternate screen, use standard conversion
+    if (self.config.prompt_padding_top == 0 or
+        self.renderer_state.terminal.screens.active_key == .alternate)
+    {
+        const coord: rendererpkg.Coordinate = .{ .surface = .{ .x = xpos, .y = ypos } };
+        const grid = coord.convert(.grid, self.size).grid;
+        return .{ .x = grid.x, .y = grid.y };
+    }
+
+    const grid_size = self.size.grid();
+    const cell_width: f64 = @floatFromInt(self.size.cell.width);
+    const cell_height: f64 = @floatFromInt(self.size.cell.height);
+    const pad: f64 = @floatFromInt(self.config.prompt_padding_top);
+
+    const term_y: f64 = @max(0, ypos - @as(f64, @floatFromInt(self.size.padding.top)));
+    const term_x: f64 = @max(0, xpos - @as(f64, @floatFromInt(self.size.padding.left)));
+
+    const col: terminal.size.CellCountInt = @min(
+        @as(terminal.size.CellCountInt, @intFromFloat(term_x / cell_width)),
+        grid_size.columns - 1,
+    );
+
+    const screen = self.renderer_state.terminal.screens.active;
+    var p: ?terminal.Pin = screen.pages.getTopLeft(.viewport);
+
+    var cur_y: f64 = 0;
+    var row: terminal.size.CellCountInt = grid_size.rows - 1;
+
+    for (0..grid_size.rows) |r| {
+        if (r > 0 and p != null) {
+            p = p.?.down(1);
+        }
+        if (p) |pin| {
+            if (pin.rowAndCell().row.prompt_pre_pad) {
+                cur_y += pad;
+            }
+        }
+        const next_y = cur_y + cell_height;
+        if (term_y < next_y or r == grid_size.rows - 1) {
+            row = @intCast(r);
+            break;
+        }
+        cur_y = next_y;
+    }
+
+    return .{ .x = col, .y = row };
 }
 
 /// Scroll to the bottom of the viewport.
@@ -6743,4 +6787,54 @@ test "promptClickRelativeRow" {
         );
         try testing.expectEqual(case.expected, promptClickRelativeRow(&pages, prompt, click));
     }
+}
+
+test "posToViewport with prompt-padding-top" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var term = try terminal.Terminal.init(testing.io, alloc, .{ .cols = 80, .rows = 10 });
+    defer term.deinit(alloc);
+
+    var surface: Surface = undefined;
+    surface.config.prompt_padding_top = 4;
+    surface.renderer_state.terminal = &term;
+    surface.size = .{
+        .cell = .{ .width = 10, .height = 20 },
+        .screen = .{ .width = 800, .height = 200 },
+        .padding = .{ .top = 0, .bottom = 0, .left = 0, .right = 0 },
+    };
+
+    // Row 0: normal row
+    // Row 1: prompt row with prompt_pre_pad = true
+    term.screens.active.pages.getCell(.{ .viewport = .{ .x = 0, .y = 1 } }).?.row.prompt_pre_pad = true;
+
+    // When prompt_padding_top == 0, fast path
+    surface.config.prompt_padding_top = 0;
+    try testing.expectEqual(@as(terminal.size.CellCountInt, 1), surface.posToViewport(15, 22).y);
+    try testing.expectEqual(@as(terminal.size.CellCountInt, 2), surface.posToViewport(15, 42).y);
+
+    // When prompt_padding_top == 4:
+    // Row 0 is [0, 20)
+    // Gap above row 1 is [20, 24) -> should map to row 1
+    // Row 1 is [24, 44) -> maps to row 1
+    // Row 2 is [44, 64) -> maps to row 2
+    surface.config.prompt_padding_top = 4;
+    try testing.expectEqual(@as(terminal.size.CellCountInt, 0), surface.posToViewport(15, 10).y);
+    try testing.expectEqual(@as(terminal.size.CellCountInt, 0), surface.posToViewport(15, 19).y);
+    // Gap at y = 22 maps to row 1 (the prompt row)
+    try testing.expectEqual(@as(terminal.size.CellCountInt, 1), surface.posToViewport(15, 22).y);
+    // Inside row 1
+    try testing.expectEqual(@as(terminal.size.CellCountInt, 1), surface.posToViewport(15, 25).y);
+    try testing.expectEqual(@as(terminal.size.CellCountInt, 1), surface.posToViewport(15, 43).y);
+    // At y = 42, without prompt padding this would have mapped to row 2 (mismatch),
+    // but with prompt padding it correctly maps to row 1!
+    try testing.expectEqual(@as(terminal.size.CellCountInt, 1), surface.posToViewport(15, 42).y);
+    // Row 2 starts at 44
+    try testing.expectEqual(@as(terminal.size.CellCountInt, 2), surface.posToViewport(15, 45).y);
+
+    // Altscreen isolation: switch to alternate screen
+    term.screens.active_key = .alternate;
+    // On alternate screen, prompt_padding_top is bypassed, y = 42 maps to row 2
+    try testing.expectEqual(@as(terminal.size.CellCountInt, 2), surface.posToViewport(15, 42).y);
 }

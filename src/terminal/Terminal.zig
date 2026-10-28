@@ -2166,6 +2166,21 @@ pub fn semanticPrompt(
 
             const screen: *Screen = self.screens.active;
 
+            // Prompt pre-padding:
+            // 1. Never apply on alternate screen
+            // 2. Only apply if previous state emitted command output (OSC 133 ; C or D)
+            // 3. Only apply if cursor is not at line 0 of the viewport/scrollback
+            //    (or if at line 0, there is scrolled history above the active area)
+            if (self.screens.active_key == .primary and
+                screen.semantic_prompt.command_output and
+                (screen.cursor.y > 0 or screen.hasScrollback()))
+            {
+                screen.cursor.page_row.prompt_pre_pad = true;
+                screen.cursor.page_row.dirty = true;
+                self.flags.dirty.clear = true;
+            }
+            screen.semantic_prompt.command_output = false;
+
             // "Subsequent text (until a OSC "133;B" or OSC "133;I" command)
             // is a prompt string (as if followed by OSC 133;P;k=i\007)."
             screen.cursorSetSemanticContent(.{
@@ -2244,6 +2259,8 @@ pub fn semanticPrompt(
         },
 
         .end_input_start_output => {
+            self.screens.active.semantic_prompt.command_output = true;
+
             // "End of input, and start of output."
             self.screens.active.cursorSetSemanticContent(.output);
 
@@ -2264,6 +2281,8 @@ pub fn semanticPrompt(
         },
 
         .end_command => {
+            self.screens.active.semantic_prompt.command_output = true;
+
             // From a terminal state perspective, this doesn't really do
             // anything. Other terminals appear to do nothing here. I think
             // its reasonable at this point to reset our semantic content
@@ -3694,6 +3713,13 @@ pub fn eraseDisplay(
     mode: csi.EraseDisplay,
     protected_req: bool,
 ) void {
+    switch (mode) {
+        .complete, .scroll_complete => {
+            self.screens.active.semantic_prompt.command_output = false;
+        },
+        else => {},
+    }
+
     // We respect protected attributes if explicitly requested (probably
     // a DECSEL sequence) or if our last protected mode was ISO even if its
     // not currently set.
@@ -16213,6 +16239,216 @@ test "Terminal: OSC133A no click options leaves click as none" {
     });
 
     try testing.expectEqual(.none, t.screens.active.semantic_prompt.click);
+}
+
+test "Terminal: prompt_pre_pad initial prompt at line 0 without scrollback is false" {
+    const alloc = testing.allocator;
+    const io_impl = testing.io;
+    var t = try init(io_impl, alloc, .{ .cols = 10, .rows = 5 });
+    defer t.deinit(alloc);
+
+    try t.semanticPrompt(.init(.fresh_line_new_prompt));
+    try testing.expectEqual(@as(size.CellCountInt, 0), t.screens.active.cursor.y);
+    try testing.expect(!t.screens.active.hasScrollback());
+    try testing.expect(!t.screens.active.cursor.page_row.prompt_pre_pad);
+}
+
+test "Terminal: prompt_pre_pad command output followed by prompt sets prompt_pre_pad" {
+    const alloc = testing.allocator;
+    const io_impl = testing.io;
+    var t = try init(io_impl, alloc, .{ .cols = 10, .rows = 5 });
+    defer t.deinit(alloc);
+
+    // Initial prompt at line 0
+    try t.semanticPrompt(.init(.fresh_line_new_prompt));
+    for ("$ ") |c| try t.print(c);
+    try testing.expect(!t.screens.active.cursor.page_row.prompt_pre_pad);
+
+    // Command input & output
+    try t.semanticPrompt(.init(.end_prompt_start_input));
+    for ("ls") |c| try t.print(c);
+    try t.semanticPrompt(.init(.end_input_start_output));
+    t.carriageReturn();
+    try t.linefeed();
+    for ("file.txt") |c| try t.print(c);
+    try t.semanticPrompt(.init(.end_command));
+
+    // Next prompt (on line 2)
+    try t.semanticPrompt(.init(.fresh_line_new_prompt));
+    try testing.expect(t.screens.active.cursor.y > 0);
+    try testing.expect(t.screens.active.cursor.page_row.prompt_pre_pad);
+}
+
+test "Terminal: prompt_pre_pad empty prompt without command output does not set prompt_pre_pad" {
+    const alloc = testing.allocator;
+    const io_impl = testing.io;
+    var t = try init(io_impl, alloc, .{ .cols = 10, .rows = 5 });
+    defer t.deinit(alloc);
+
+    // Prompt 1
+    try t.semanticPrompt(.init(.fresh_line_new_prompt));
+    for ("$ ") |c| try t.print(c);
+    try testing.expect(!t.screens.active.cursor.page_row.prompt_pre_pad);
+
+    // User presses enter without running a command (no OSC 133 C or D)
+    t.carriageReturn();
+    try t.linefeed();
+
+    // Prompt 2
+    try t.semanticPrompt(.init(.fresh_line_new_prompt));
+    try testing.expect(!t.screens.active.cursor.page_row.prompt_pre_pad);
+}
+
+test "Terminal: prompt_pre_pad command output with scrollback at line 0 sets prompt_pre_pad" {
+    const alloc = testing.allocator;
+    const io_impl = testing.io;
+    var t = try init(io_impl, alloc, .{ .cols = 10, .rows = 3 });
+    defer t.deinit(alloc);
+
+    // Fill terminal and scroll to create scrollback
+    for (0..10) |_| {
+        t.carriageReturn();
+        try t.linefeed();
+    }
+    try testing.expect(t.screens.active.hasScrollback());
+
+    // Command output
+    try t.semanticPrompt(.init(.end_input_start_output));
+    try t.semanticPrompt(.init(.end_command));
+
+    // Force cursor to row 0
+    t.setCursorPos(1, 1);
+    try testing.expectEqual(@as(size.CellCountInt, 0), t.screens.active.cursor.y);
+
+    // Next prompt at row 0 with scrollback present
+    try t.semanticPrompt(.init(.fresh_line_new_prompt));
+    try testing.expect(t.screens.active.cursor.page_row.prompt_pre_pad);
+}
+
+test "Terminal: prompt_pre_pad alternate screen isolation" {
+    const alloc = testing.allocator;
+    const io_impl = testing.io;
+    var t = try init(io_impl, alloc, .{ .cols = 10, .rows = 5 });
+    defer t.deinit(alloc);
+
+    // Switch to alternate screen
+    _ = try t.switchScreen(.alternate);
+    try testing.expectEqual(.alternate, t.screens.active_key);
+
+    // Move to row 1, emit command output and prompt
+    t.setCursorPos(2, 1);
+    try t.semanticPrompt(.init(.end_input_start_output));
+    try t.semanticPrompt(.init(.end_command));
+    try t.semanticPrompt(.init(.fresh_line_new_prompt));
+
+    // Must never set prompt_pre_pad in alternate screen
+    try testing.expect(!t.screens.active.cursor.page_row.prompt_pre_pad);
+
+    // Switch back to primary screen
+    _ = try t.switchScreen(.primary);
+    try testing.expectEqual(.primary, t.screens.active_key);
+    try testing.expect(!t.screens.active.cursor.page_row.prompt_pre_pad);
+}
+
+test "Terminal: prompt_pre_pad clearing screen clears flag and command output state" {
+    const alloc = testing.allocator;
+    const io_impl = testing.io;
+    var t = try init(io_impl, alloc, .{ .cols = 10, .rows = 5 });
+    defer t.deinit(alloc);
+
+    // Move to row 1, emit command output and prompt
+    t.setCursorPos(2, 1);
+    try t.semanticPrompt(.init(.end_input_start_output));
+    try t.semanticPrompt(.init(.end_command));
+    try t.semanticPrompt(.init(.fresh_line_new_prompt));
+    try testing.expect(t.screens.active.cursor.page_row.prompt_pre_pad);
+
+    // Clear display
+    t.eraseDisplay(.complete, false);
+
+    // Flag on row must be cleared
+    {
+        const list_cell = t.screens.active.pages.getCell(.{ .active = .{
+            .x = 0,
+            .y = 1,
+        } }).?;
+        try testing.expect(!list_cell.row.prompt_pre_pad);
+    }
+
+    // Subsequent prompt at (0, 0) right after clear must not receive pre-pad
+    t.setCursorPos(1, 1);
+    try t.semanticPrompt(.init(.fresh_line_new_prompt));
+    try testing.expect(!t.screens.active.cursor.page_row.prompt_pre_pad);
+}
+
+test "Terminal: prompt_pre_pad retained as row scrolls into scrollback" {
+    const alloc = testing.allocator;
+    const io_impl = testing.io;
+    var t = try init(io_impl, alloc, .{ .cols = 10, .rows = 3 });
+    defer t.deinit(alloc);
+
+    // Emit prompt on line 1 with pre-pad
+    t.setCursorPos(2, 1);
+    try t.semanticPrompt(.init(.end_input_start_output));
+    try t.semanticPrompt(.init(.end_command));
+    try t.semanticPrompt(.init(.fresh_line_new_prompt));
+    try t.print('P');
+    try testing.expect(t.screens.active.cursor.page_row.prompt_pre_pad);
+
+    // Scroll by printing several lines so prompt row moves into scrollback
+    for (0..6) |_| {
+        for ("scroll\r\n") |c| try t.print(c);
+    }
+    try testing.expect(t.screens.active.hasScrollback());
+
+    // Search through all rows from top of screen/history to find prompt_pre_pad row
+    var found = false;
+    var it = t.screens.active.pages.pageIterator(
+        .right_down,
+        .{ .screen = .{} },
+        null,
+    );
+    while (it.next()) |chunk| {
+        for (chunk.rows()) |row| {
+            if (row.prompt_pre_pad) {
+                found = true;
+                break;
+            }
+        }
+        if (found) break;
+    }
+    try testing.expect(found);
+}
+
+test "Terminal: prompt_pre_pad retained during resize reflow" {
+    const alloc = testing.allocator;
+    const io_impl = testing.io;
+    var t = try init(io_impl, alloc, .{ .cols = 12, .rows = 5 });
+    defer t.deinit(alloc);
+
+    // Create prompt with pre-pad on line 1
+    t.setCursorPos(2, 1);
+    try t.semanticPrompt(.init(.end_input_start_output));
+    try t.semanticPrompt(.init(.end_command));
+    try t.semanticPrompt(.init(.fresh_line_new_prompt));
+    try testing.expect(t.screens.active.cursor.page_row.prompt_pre_pad);
+
+    // Print text that will soft-wrap when resized to cols=6
+    for ("12345678") |c| try t.print(c);
+
+    // Resize from 12 to 6 columns
+    try t.resize(alloc, .{
+        .cols = 6,
+        .rows = 5,
+    });
+
+    // The first line of the prompt must keep prompt_pre_pad
+    const p1 = t.screens.active.pages.getCell(.{ .active = .{ .x = 0, .y = 1 } }).?;
+    try testing.expect(p1.row.prompt_pre_pad);
+
+    // The wrapped continuation line must NOT have prompt_pre_pad
+    const p2 = t.screens.active.pages.getCell(.{ .active = .{ .x = 0, .y = 2 } }).?;
+    try testing.expect(!p2.row.prompt_pre_pad);
 }
 
 test "Terminal: cursorIsAtPrompt" {

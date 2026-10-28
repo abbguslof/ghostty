@@ -2068,6 +2068,16 @@ keybind: Keybinds = .{},
 ///   don't look good extended.
 @"window-padding-color": WindowPaddingColor = .background,
 
+/// Additional pixel padding to render above a shell prompt detected via
+/// OSC 133 shell integration.
+///
+/// This visually separates command output from the next prompt without
+/// adding a full empty grid row.
+///
+/// This setting has no effect in alternate screen applications (such as tmux
+/// or Neovim).
+@"prompt-padding-top": u16 = 0,
+
 /// Synchronize rendering with the screen refresh rate. If true, this will
 /// minimize tearing and align redraws with the screen but may cause input
 /// latency. If false, this will maximize redraw frequency but may cause tearing,
@@ -4190,6 +4200,28 @@ test "handle bom in config files" {
             cfg.@"abnormal-command-exit-runtime",
         );
     }
+}
+
+test "prompt-padding-top config parsing" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    const data = "prompt-padding-top = 6\n";
+    var reader: std.Io.Reader = .fixed(data);
+    var cfg = try Config.default(alloc);
+    defer cfg.deinit();
+    try cfg.loadReader(
+        alloc,
+        &reader,
+        "/home/ghostty/.config/ghostty/config.ghostty",
+    );
+    try cfg.finalize();
+
+    try testing.expect(cfg._diagnostics.empty());
+    try testing.expectEqual(
+        @as(u16, 6),
+        cfg.@"prompt-padding-top",
+    );
 }
 
 pub const OptionalFileAction = enum { loaded, not_found, @"error" };

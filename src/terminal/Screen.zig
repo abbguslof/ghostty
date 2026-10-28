@@ -111,9 +111,15 @@ pub const SemanticPrompt = struct {
     /// prompt is handling.
     click: SemanticClick,
 
+    /// True if command output was emitted (OSC 133 ; C or D) since the
+    /// previous prompt. This is used to determine whether the next prompt
+    /// should receive prompt_pre_pad.
+    command_output: bool = false,
+
     pub const disabled: SemanticPrompt = .{
         .seen = false,
         .click = .none,
+        .command_output = false,
     };
 
     pub const SemanticClickKind = lib.Enum(
@@ -1773,6 +1779,11 @@ pub inline fn scrollClear(self: *Screen) !void {
 /// Returns true if the viewport is scrolled to the bottom of the screen.
 pub inline fn viewportIsBottom(self: Screen) bool {
     return self.pages.viewport == .active;
+}
+
+/// Returns true if there are any rows in the scrollback history above the active area.
+pub inline fn hasScrollback(self: *const Screen) bool {
+    return self.pages.hasScrollback();
 }
 
 /// Erase the region specified by tl and br, inclusive. This will physically

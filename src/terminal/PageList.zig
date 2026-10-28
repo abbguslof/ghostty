@@ -1757,6 +1757,7 @@ const ReflowCursor = struct {
                 self.page_row.wrap = true;
                 try self.cursorScrollOrNewPage(list, cap);
                 self.copyRowMetadata(src_row);
+                self.page_row.prompt_pre_pad = false;
                 self.page_row.wrap_continuation = true;
             }
 
@@ -2786,6 +2787,7 @@ const ReflowCursor = struct {
 
     fn copyRowMetadata(self: *ReflowCursor, other: *const Row) void {
         self.page_row.semantic_prompt = other.semantic_prompt;
+        self.page_row.prompt_pre_pad = other.prompt_pre_pad;
     }
 };
 
@@ -6820,6 +6822,12 @@ pub fn getBottomRight(self: *const PageList, tag: point.Tag) ?Pin {
             break :active br;
         },
     };
+}
+
+/// Returns true if there are any rows in the scrollback history above the active area.
+pub fn hasScrollback(self: *const PageList) bool {
+    const tl = self.getTopLeft(.active);
+    return tl.up(1) != null;
 }
 
 /// The total rows in the screen. This is the actual row count currently

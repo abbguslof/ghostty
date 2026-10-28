@@ -2109,7 +2109,11 @@ pub const Row = packed struct(u64) {
     /// screen.
     dirty: bool = false,
 
-    _padding: u23 = 0,
+    /// True if this row has sub-cell pre-padding immediately above it
+    /// due to OSC 133 semantic prompt detection.
+    prompt_pre_pad: bool = false,
+
+    _padding: u22 = 0,
 
     /// The semantic prompt state of the row. See `semantic_prompt`.
     pub const SemanticPrompt = enum(u2) {

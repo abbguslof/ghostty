@@ -37,7 +37,7 @@ fn getValue(ptr_raw: *anyopaque, value: anytype) bool {
             ptr.* = value;
         },
 
-        u8, u32 => {
+        u8, u16, u32 => {
             const ptr: *c_uint = @ptrCast(@alignCast(ptr_raw));
             ptr.* = @intCast(value);
         },
@@ -129,6 +129,19 @@ test "c_get: u8" {
     var cval: f32 = undefined;
     try testing.expect(get(&c, .@"font-size", &cval));
     try testing.expectEqual(@as(f32, 24), cval);
+}
+
+test "c_get: u16" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var c = try Config.default(alloc);
+    defer c.deinit();
+    c.@"prompt-padding-top" = 5;
+
+    var cval: c_uint = undefined;
+    try testing.expect(get(&c, .@"prompt-padding-top", &cval));
+    try testing.expectEqual(@as(c_uint, 5), cval);
 }
 
 test "c_get: enum" {

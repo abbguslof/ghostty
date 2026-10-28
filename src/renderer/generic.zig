@@ -623,6 +623,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             background_blur: configpkg.Config.BackgroundBlur,
             scroll_to_bottom_on_output: bool,
             custom_shader_animation: configpkg.CustomShaderAnimation,
+            prompt_padding_top: u16,
 
             pub fn init(
                 alloc_gpa: Allocator,
@@ -698,6 +699,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                     .background_blur = config.@"background-blur",
                     .scroll_to_bottom_on_output = config.@"scroll-to-bottom".output,
                     .custom_shader_animation = config.@"custom-shader-animation",
+                    .prompt_padding_top = config.@"prompt-padding-top",
                     .arena = arena,
                 };
             }
@@ -2650,7 +2652,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 self.uniforms.grid_size = .{ new_size.columns, new_size.rows };
             }
 
-            const rebuild = state.dirty == .full or grid_size_diff;
+            var rebuild = state.dirty == .full or grid_size_diff;
             if (rebuild) {
                 // If we are doing a full rebuild, then we clear the entire cell buffer.
                 self.cells.reset();
@@ -2693,6 +2695,24 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 self.cells.size.rows,
             );
 
+            // Padding calculation for semantic prompt pre-padding.
+            // If prompt_padding_top == 0 or on alternate screen, this is completely bypassed (zero-overhead fast path).
+            const pad_enabled = self.config.prompt_padding_top > 0 and state.screen == .primary;
+            if (pad_enabled and !rebuild) {
+                for (row_raws[0..row_len], row_dirty[0..row_len]) |row, dirty| {
+                    if (dirty and row.prompt_pre_pad) {
+                        rebuild = true;
+                        self.cells.reset();
+                        break;
+                    }
+                }
+            }
+
+            var y_offset: u32 = 0;
+            var cursor_y_offset: u32 = 0;
+            const cursor_vp_y: ?terminal.size.CellCountInt = if (state.cursor.viewport) |vp| @intCast(vp.y) else null;
+            var preedit_y_offset: u32 = 0;
+
             // Determine our x/y range for preedit. We don't want to render anything
             // here because we will render the preedit separately.
             const preedit_range: ?PreeditRange = if (preedit) |preedit_v| preedit: {
@@ -2718,6 +2738,8 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 };
             } else null;
 
+            const preedit_vp_y: ?terminal.size.CellCountInt = if (preedit_range) |pr| @intCast(pr.y) else null;
+
             for (
                 0..,
                 row_raws[0..row_len],
@@ -2727,6 +2749,18 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 row_highlights[0..row_len],
             ) |y_usize, row, *cells, *dirty, selection, *highlights| {
                 const y: terminal.size.CellCountInt = @intCast(y_usize);
+
+                if (pad_enabled) {
+                    if (row.prompt_pre_pad) {
+                        y_offset += self.config.prompt_padding_top;
+                    }
+                    if (cursor_vp_y != null and y == cursor_vp_y.?) {
+                        cursor_y_offset = y_offset;
+                    }
+                    if (preedit_vp_y != null and y == preedit_vp_y.?) {
+                        preedit_y_offset = y_offset;
+                    }
+                }
 
                 if (!rebuild) {
                     // Only rebuild if we are doing a full rebuild or this row is dirty.
@@ -2741,6 +2775,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
 
                 self.rebuildRow(
                     y,
+                    y_offset,
                     row,
                     cells,
                     preedit_range,
@@ -2829,6 +2864,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                     &state.cursor,
                     style,
                     cursor_color,
+                    cursor_y_offset,
                 );
 
                 // If the cursor is visible then we set our uniforms.
@@ -2901,6 +2937,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                         cp,
                         .{ .x = x, .y = range.y },
                         state.colors.foreground,
+                        preedit_y_offset,
                     ) catch |err| {
                         log.warn("error building preedit cell, will be invalid x={} y={}, err={}", .{
                             x,
@@ -2925,6 +2962,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
         fn rebuildRow(
             self: *Self,
             y: terminal.size.CellCountInt,
+            y_offset: u32,
             row: terminal.page.Row,
             cells: *std.MultiArrayList(terminal.RenderState.Cell),
             preedit_range: ?PreeditRange,
@@ -3264,6 +3302,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 if (underline != .none) self.addUnderline(
                     @intCast(x),
                     @intCast(y),
+                    y_offset,
                     underline,
                     style.underlineColor(&state.colors.palette) orelse fg,
                     alpha,
@@ -3274,7 +3313,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                     );
                 };
 
-                if (style.flags.overline) self.addOverline(@intCast(x), @intCast(y), fg, alpha) catch |err| {
+                if (style.flags.overline) self.addOverline(@intCast(x), @intCast(y), y_offset, fg, alpha) catch |err| {
                     log.warn(
                         "error adding overline to cell, will be invalid x={} y={}, err={}",
                         .{ x, y, err },
@@ -3340,6 +3379,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                         self.addGlyph(
                             @intCast(x),
                             @intCast(y),
+                            y_offset,
                             state.cols,
                             cells_raw,
                             shaped_cells[shaper_cells_i],
@@ -3359,6 +3399,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 if (style.flags.strikethrough) self.addStrikethrough(
                     @intCast(x),
                     @intCast(y),
+                    y_offset,
                     fg,
                     alpha,
                 ) catch |err| {
@@ -3375,6 +3416,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             self: *Self,
             x: terminal.size.CellCountInt,
             y: terminal.size.CellCountInt,
+            y_offset: u32,
             style: terminal.Attribute.Underline,
             color: terminal.color.RGB,
             alpha: u8,
@@ -3406,7 +3448,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 .glyph_size = .{ render.glyph.width, render.glyph.height },
                 .bearings = .{
                     @intCast(render.glyph.offset_x),
-                    @intCast(render.glyph.offset_y),
+                    @intCast(render.glyph.offset_y - @as(i32, @intCast(y_offset))),
                 },
             });
         }
@@ -3416,6 +3458,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             self: *Self,
             x: terminal.size.CellCountInt,
             y: terminal.size.CellCountInt,
+            y_offset: u32,
             color: terminal.color.RGB,
             alpha: u8,
         ) !void {
@@ -3437,7 +3480,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 .glyph_size = .{ render.glyph.width, render.glyph.height },
                 .bearings = .{
                     @intCast(render.glyph.offset_x),
-                    @intCast(render.glyph.offset_y),
+                    @intCast(render.glyph.offset_y - @as(i32, @intCast(y_offset))),
                 },
             });
         }
@@ -3447,6 +3490,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             self: *Self,
             x: terminal.size.CellCountInt,
             y: terminal.size.CellCountInt,
+            y_offset: u32,
             color: terminal.color.RGB,
             alpha: u8,
         ) !void {
@@ -3468,7 +3512,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 .glyph_size = .{ render.glyph.width, render.glyph.height },
                 .bearings = .{
                     @intCast(render.glyph.offset_x),
-                    @intCast(render.glyph.offset_y),
+                    @intCast(render.glyph.offset_y - @as(i32, @intCast(y_offset))),
                 },
             });
         }
@@ -3478,6 +3522,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             self: *Self,
             x: terminal.size.CellCountInt,
             y: terminal.size.CellCountInt,
+            y_offset: u32,
             cols: usize,
             cell_raws: []const terminal.page.Cell,
             shaper_cell: font.shape.Cell,
@@ -3531,7 +3576,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 .glyph_size = .{ render.glyph.width, render.glyph.height },
                 .bearings = .{
                     @intCast(render.glyph.offset_x + shaper_cell.x_offset),
-                    @intCast(render.glyph.offset_y + shaper_cell.y_offset),
+                    @intCast(render.glyph.offset_y + shaper_cell.y_offset - @as(i32, @intCast(y_offset))),
                 },
             });
         }
@@ -3541,6 +3586,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             cursor_state: *const terminal.RenderState.Cursor,
             cursor_style: renderer.CursorStyle,
             cursor_color: terminal.color.RGB,
+            cursor_y_offset: u32,
         ) void {
             const cursor_vp = cursor_state.viewport orelse return;
 
@@ -3620,7 +3666,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 .glyph_size = .{ render.glyph.width, render.glyph.height },
                 .bearings = .{
                     @intCast(render.glyph.offset_x),
-                    @intCast(render.glyph.offset_y),
+                    @intCast(render.glyph.offset_y - @as(i32, @intCast(cursor_y_offset))),
                 },
             }, cursor_style);
         }
@@ -3630,6 +3676,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             cp: renderer.State.Preedit.Codepoint,
             coord: terminal.Coordinate,
             screen_fg: terminal.color.RGB,
+            y_offset: u32,
         ) !void {
             // Render the glyph for our preedit text
             const render_ = self.font_grid.renderCodepoint(
@@ -3660,14 +3707,14 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 .glyph_size = .{ render.glyph.width, render.glyph.height },
                 .bearings = .{
                     @intCast(render.glyph.offset_x),
-                    @intCast(render.glyph.offset_y),
+                    @intCast(render.glyph.offset_y - @as(i32, @intCast(y_offset))),
                 },
             });
 
             // Add underline
-            try self.addUnderline(@intCast(coord.x), @intCast(coord.y), .single, screen_fg, 255);
+            try self.addUnderline(@intCast(coord.x), @intCast(coord.y), y_offset, .single, screen_fg, 255);
             if (cp.wide and coord.x < self.cells.size.columns - 1) {
-                try self.addUnderline(@intCast(coord.x + 1), @intCast(coord.y), .single, screen_fg, 255);
+                try self.addUnderline(@intCast(coord.x + 1), @intCast(coord.y), y_offset, .single, screen_fg, 255);
             }
         }
 
