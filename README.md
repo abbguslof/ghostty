@@ -21,6 +21,20 @@
   </p>
 </p>
 
+> [!TIP]
+> ### 🎨 Fork Feature: Semantic Prompt Pre-Padding (`prompt-padding-top`)
+>
+> This fork introduces **Semantic Prompt Pre-Padding**, adding configurable sub-cell vertical spacing above shell prompts detected via OSC 133 shell integration. It cleanly separates command output from the next prompt without inserting artificial blank lines or disrupting mouse selection, copy-paste, and scrollback.
+>
+> ```ini
+> # ~/.config/ghostty/config
+> prompt-padding-top = 4
+> ```
+>
+> - **Precise Sub-Cell Geometry**: Shifts glyph and decoration quads smoothly with sub-pixel vertex offsets.
+> - **Intelligent Mouse Hit-Testing**: Mouse clicks and drag-selection automatically compensate for accumulated row padding.
+> - **Zero Alternate-Screen Overhead**: Automatically disabled in full-screen alternate screen programs (`tmux`, `neovim`) with zero runtime overhead when set to `0`.
+
 ## About
 
 Ghostty is a terminal emulator that differentiates itself by being
