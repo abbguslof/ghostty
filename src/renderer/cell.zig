@@ -50,6 +50,10 @@ pub const Contents = struct {
     /// of directly indexing in order to avoid integer size bugs.
     bg_cells: []shaderpkg.CellBg = &.{},
 
+    /// Array containing cumulative row y_offsets due to prompt padding.
+    /// Indexed as `row_offsets[row]`.
+    row_offsets: []u32 = &.{},
+
     /// The lists which hold all of the foreground cells. When sized with
     /// Contents.resize the individual ArrayLists are given enough room that
     /// they can hold a single row with #cols glyphs, underlines, and
@@ -75,6 +79,7 @@ pub const Contents = struct {
 
     pub fn deinit(self: *Contents, alloc: Allocator) void {
         alloc.free(self.bg_cells);
+        alloc.free(self.row_offsets);
         for (self.fg_rows) |*row| row.deinit(alloc);
         alloc.free(self.fg_rows);
     }
@@ -115,13 +120,19 @@ pub const Contents = struct {
             self.bg_cells,
             row_count * @as(usize, size.columns),
         );
+        self.bg_cells = bg_cells;
+
+        const row_offsets = try alloc.realloc(
+            self.row_offsets,
+            row_count,
+        );
+        self.row_offsets = row_offsets;
 
         // Perform the swap, no going back from here.
         errdefer comptime unreachable;
         for (self.fg_rows) |*row| row.deinit(alloc);
         alloc.free(self.fg_rows);
         self.size = size;
-        self.bg_cells = bg_cells;
         self.fg_rows = fg_rows;
         self.reset();
     }
@@ -129,6 +140,7 @@ pub const Contents = struct {
     /// Reset the cell contents to an empty state without resizing.
     pub fn reset(self: *Contents) void {
         @memset(self.bg_cells, .{ 0, 0, 0, 0 });
+        @memset(self.row_offsets, 0);
         for (self.fg_rows) |*row| row.clearRetainingCapacity();
     }
 

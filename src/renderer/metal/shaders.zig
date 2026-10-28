@@ -252,6 +252,9 @@ pub const Uniforms = extern struct {
         /// with linear alpha blending have a similar apparent weight
         /// (thickness) to gamma-incorrect blending.
         use_linear_correction: bool align(1) = false,
+
+        /// Indicates that prompt padding top is active in the current frame.
+        has_prompt_padding: bool align(1) = false,
     },
 
     const PaddingExtend = packed struct(u8) {

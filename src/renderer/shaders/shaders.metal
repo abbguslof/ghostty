@@ -24,6 +24,7 @@ struct Uniforms {
   bool use_display_p3;
   bool use_linear_blending;
   bool use_linear_correction;
+  bool has_prompt_padding;
 };
 
 //-------------------------------------------------------------------
@@ -451,52 +452,89 @@ fragment float4 bg_image_fragment(
 fragment float4 cell_bg_fragment(
   FullScreenVertexOut in [[stage_in]],
   constant Uniforms& uniforms [[buffer(1)]],
-  constant uchar4 *cells [[buffer(2)]]
+  constant uchar4 *cells [[buffer(2)]],
+  constant uint *row_offsets [[buffer(3)]]
 ) {
-  int2 grid_pos = int2(floor((in.position.xy - uniforms.grid_padding.wx) / uniforms.cell_size));
+  float2 local_pos = in.position.xy - uniforms.grid_padding.wx;
+  int grid_x = int(floor(local_pos.x / uniforms.cell_size.x));
 
   float4 bg = float4(0.0);
 
   // Clamp x position, extends edge bg colors in to padding on sides.
-  if (grid_pos.x < 0) {
+  if (grid_x < 0) {
     if (uniforms.padding_extend & EXTEND_LEFT) {
-      grid_pos.x = 0;
+      grid_x = 0;
     } else {
       return bg;
     }
-  } else if (grid_pos.x > uniforms.grid_size.x - 1) {
+  } else if (grid_x > uniforms.grid_size.x - 1) {
     if (uniforms.padding_extend & EXTEND_RIGHT) {
-      grid_pos.x = uniforms.grid_size.x - 1;
+      grid_x = uniforms.grid_size.x - 1;
     } else {
       return bg;
     }
   }
 
-  // Clamp y position if we should extend, otherwise discard if out of bounds.
-  if (grid_pos.y < 0) {
-    if (uniforms.padding_extend & EXTEND_UP) {
-      grid_pos.y = 0;
-    } else {
-      return bg;
+  int grid_y;
+  if (!uniforms.has_prompt_padding) {
+    grid_y = int(floor(local_pos.y / uniforms.cell_size.y));
+    if (grid_y < 0) {
+      if (uniforms.padding_extend & EXTEND_UP) {
+        grid_y = 0;
+      } else {
+        return bg;
+      }
+    } else if (grid_y > uniforms.grid_size.y - 1) {
+      if (uniforms.padding_extend & EXTEND_DOWN) {
+        grid_y = uniforms.grid_size.y - 1;
+      } else {
+        return bg;
+      }
     }
-  } else if (grid_pos.y > uniforms.grid_size.y - 1) {
-    if (uniforms.padding_extend & EXTEND_DOWN) {
-      grid_pos.y = uniforms.grid_size.y - 1;
+  } else {
+    if (local_pos.y < 0.0) {
+      if (uniforms.padding_extend & EXTEND_UP) {
+        grid_y = 0;
+      } else {
+        return bg;
+      }
     } else {
-      return bg;
+      int low = 0;
+      int high = int(uniforms.grid_size.y) - 1;
+      int candidate = -1;
+
+      while (low <= high) {
+        int mid = low + (high - low) / 2;
+        float row_top = float(mid) * uniforms.cell_size.y + float(row_offsets[mid]);
+        if (row_top <= local_pos.y) {
+          candidate = mid;
+          low = mid + 1;
+        } else {
+          high = mid - 1;
+        }
+      }
+
+      if (candidate < 0) {
+        return bg;
+      }
+
+      float cand_top = float(candidate) * uniforms.cell_size.y + float(row_offsets[candidate]);
+      if (local_pos.y < cand_top + uniforms.cell_size.y) {
+        grid_y = candidate;
+      } else {
+        if (candidate == int(uniforms.grid_size.y) - 1 && (uniforms.padding_extend & EXTEND_DOWN)) {
+          grid_y = candidate;
+        } else {
+          return bg;
+        }
+      }
     }
   }
 
   // Load the color for the cell.
-  uchar4 cell_color = cells[grid_pos.y * uniforms.grid_size.x + grid_pos.x];
+  uchar4 cell_color = cells[grid_y * uniforms.grid_size.x + grid_x];
 
   // Convert the color and return it.
-  //
-  // TODO: It might be a good idea to do a pass before this
-  //       to convert all of the bg colors, so we don't waste
-  //       a bunch of work converting the cell color in every
-  //       fragment of each cell. It's not the most epxensive
-  //       operation, but it is still wasted work.
   return load_color(
     cell_color,
     uniforms.use_display_p3,

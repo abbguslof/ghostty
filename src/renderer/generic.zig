@@ -366,6 +366,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             uniforms: UniformBuffer,
             cells: CellTextBuffer,
             cells_bg: CellBgBuffer,
+            row_offsets: RowOffsetsBuffer,
 
             grayscale: Texture,
             grayscale_modified: usize = 0,
@@ -391,6 +392,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             const CellBgBuffer = Buffer(shaderpkg.CellBg);
             const CellTextBuffer = Buffer(shaderpkg.CellText);
             const BgImageBuffer = Buffer(shaderpkg.BgImage);
+            const RowOffsetsBuffer = Buffer(u32);
 
             pub fn init(api: GraphicsAPI, custom_shaders: bool) !FrameState {
                 // Uniform buffer contains exactly 1 uniform struct. The
@@ -409,6 +411,8 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 errdefer cells.deinit();
                 var cells_bg = try CellBgBuffer.init(api.bgBufferOptions(), 1);
                 errdefer cells_bg.deinit();
+                var row_offsets = try RowOffsetsBuffer.init(api.bufferOptions(), 1);
+                errdefer row_offsets.deinit();
 
                 // Create a GPU buffer for our background image info.
                 var bg_image_buffer = try BgImageBuffer.init(
@@ -449,6 +453,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                     .uniforms = uniforms,
                     .cells = cells,
                     .cells_bg = cells_bg,
+                    .row_offsets = row_offsets,
                     .bg_image_buffer = bg_image_buffer,
                     .grayscale = grayscale,
                     .color = color,
@@ -462,6 +467,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 self.uniforms.deinit();
                 self.cells.deinit();
                 self.cells_bg.deinit();
+                self.row_offsets.deinit();
                 self.grayscale.deinit();
                 self.color.deinit();
                 self.bg_image_buffer.deinit();
@@ -1879,6 +1885,11 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             // Setup our frame data
             try frame.uniforms.sync(&.{self.uniforms});
             try frame.cells_bg.sync(self.cells.bg_cells);
+            if (self.cells.row_offsets.len > 0) {
+                try frame.row_offsets.sync(self.cells.row_offsets);
+            } else {
+                try frame.row_offsets.sync(&[_]u32{0});
+            }
             const fg_count = try frame.cells.syncFromArrayLists(self.cells.fg_rows);
 
             // If our background image buffer has changed, sync it.
@@ -1962,7 +1973,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 pass.step(.{
                     .pipeline = self.shaders.pipelines.cell_bg,
                     .uniforms = frame.uniforms.buffer,
-                    .buffers = &.{ null, frame.cells_bg.buffer },
+                    .buffers = &.{ null, frame.cells_bg.buffer, frame.row_offsets.buffer },
                     .draw = .{ .type = .triangle, .vertex_count = 3 },
                 });
 
@@ -2760,6 +2771,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                     if (preedit_vp_y != null and y == preedit_vp_y.?) {
                         preedit_y_offset = y_offset;
                     }
+                    self.cells.row_offsets[y] = y_offset;
                 }
 
                 if (!rebuild) {
@@ -2790,6 +2802,16 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                     log.warn("error building row y={} err={}", .{ y, err });
                     self.cells.clear(y);
                 };
+            }
+
+            if (pad_enabled) {
+                if (row_len < self.cells.size.rows) {
+                    @memset(self.cells.row_offsets[row_len..], y_offset);
+                }
+                self.uniforms.bools.has_prompt_padding = (y_offset > 0);
+            } else {
+                @memset(self.cells.row_offsets, 0);
+                self.uniforms.bools.has_prompt_padding = false;
             }
 
             // Setup our cursor rendering information.

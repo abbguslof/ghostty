@@ -218,7 +218,10 @@ pub const Uniforms = extern struct {
         /// (thickness) to gamma-incorrect blending.
         use_linear_correction: bool = false,
 
-        _padding: u28 = 0,
+        /// Indicates that prompt padding top is active in the current frame.
+        has_prompt_padding: bool = false,
+
+        _padding: u27 = 0,
     };
 
     const PaddingExtend = packed struct(u32) {
